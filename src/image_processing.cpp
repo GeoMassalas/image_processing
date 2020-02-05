@@ -1,23 +1,32 @@
 #include <ros/ros.h>
+#include <string>
 #include <image_transport/image_transport.h>
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/image_encodings.h>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
-#include <image_processing/screen_points.h>
 #include <std_msgs/String.h>
-#include <geometry_msgs/Point32.h>
+#include <std_msgs/Int8.h>
+#include <std_msgs/Int16.h>
+#include <image_processing/Point2D.h>
+#include <image_processing/Point2DArray.h>
+#include <image_processing/Point2DStamped.h>
+#include <image_processing/Point2DStampedArray.h>
+
+
 
 static const std::string OPENCV_WINDOW = "Open-CV display window";
+static const std::string OPENCV_WINDOW_TR = "Transformed/Blured Image";
+static const std::string OPENCV_WINDOW_THR = "Threshold-ed Image";
 
 using namespace std;
 
 /*
 *   TODOS :
-*   1.add threshold command, outputQuad 
-*   2.all commands-> 1 Subscriber
-*   3.Switch msgs to more effective ones
-*   4.A more info statements
+*   add outputQuad command,
+*   image size variable/commands
+*   GUI for threshold /
+*   https://docs.opencv.org/3.4/d8/dd8/tutorial_good_features_to_track.html
 */
 
 
@@ -25,15 +34,18 @@ class ImageConverter {
   ros::NodeHandle nh_;
   image_transport::ImageTransport it_;
   image_transport::Subscriber image_sub_;
+  image_transport::Publisher image_pub_;
   ros::Subscriber point_sub_;
   ros::Subscriber command_sub_;
+  ros::Subscriber threshold_sub_;
+  ros::Publisher position_pub_;
   cv::Point2f outputQuad[4];
   cv::Point2f inputQuad[4];
   cv::Mat screenshot;
   bool take_image;
   bool pub_positions;
-  image_transport::Publisher image_pub_;
-  ros::Publisher position_pub_;
+  int threshold;
+
 public:
 
 
@@ -41,10 +53,16 @@ public:
   : it_(nh_) {
       // Subscribe to input video feed and publish output video feed
       image_sub_ = it_.subscribe("/usb_cam/image_raw", 1, &ImageConverter::imageCb, this);
+      image_pub_ = it_.advertise("/image_processing/debug", 1); // curently not in use
+
+      // Subscribers needed for setup
       point_sub_ = nh_.subscribe("/image_processing/screen_setup", 1, &ImageConverter::points_setup, this);
-      command_sub_ = nh_.subscribe("/image_processing/command", 1, &ImageConverter::command, this );
-      image_pub_ = it_.advertise("/image_processing/debug", 1);
-      position_pub_ = nh_.advertise<geometry_msgs::Point32>("/image_processing/position", 1);
+      command_sub_ = nh_.subscribe("/image_processing/command", 1, &ImageConverter::command, this);
+      threshold_sub_ = nh_.subscribe("/image_processing/threshold", 1,  &ImageConverter::threshold_setup, this);
+
+      // Position publisher
+      position_pub_ = nh_.advertise<image_processing::Point2DStampedArray>("/image_processing/position", 1);
+
       // The 4 points that select quadilateral on the input , from top-left in clockwise order
       // These four pts are the sides of the rect box used as input
       inputQuad[0] = cv::Point2f(0,0);
@@ -56,16 +74,36 @@ public:
       outputQuad[1] = cv::Point2f(400,0);
       outputQuad[2] = cv::Point2f(400,400);
       outputQuad[3] = cv::Point2f(0,400);
-      take_image = true;
 
+      // Iniatial values for given variables
+      take_image = true;
+      pub_positions = false;
+      threshold = 30;
+
+      // Debuggin and demonstration windows
+      cv::namedWindow(OPENCV_WINDOW_THR);
+      cv::namedWindow(OPENCV_WINDOW_TR);
       cv::namedWindow(OPENCV_WINDOW);
+      // placing the windows far appart
+      cv::moveWindow(OPENCV_WINDOW_THR, 400,0);
+      cv::moveWindow(OPENCV_WINDOW, 800,0);
+
   }
 
   ~ImageConverter() {
       cv::destroyWindow(OPENCV_WINDOW);
+      cv::destroyWindow(OPENCV_WINDOW_THR);
+      cv::destroyWindow(OPENCV_WINDOW_TR);
   }
-  //image comes in as a ROS message, but gets converted to an OpenCV type
+
+  /******************************** imageCb ************************************
+  *  This function is the image conversion loop
+  *
+  *  Example Usage :
+  *  rostopic pub -1 /image_processing/threshold std_msgs/Int8 "data: 30"
+  *****************************************************************************/
   void imageCb(const sensor_msgs::ImageConstPtr& msg) {
+    //image comes in as a ROS message, but gets converted to an OpenCV type
     cv_bridge::CvImagePtr cv_ptr; //OpenCV data type
     try {
       cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
@@ -84,6 +122,9 @@ public:
     warpPerspective(gray_image,output,lambda, cv::Size(400, 400) );
     /// Reduce noise with a kernel 3x3
     blur( output, output, cv::Size(3,3) );
+    // Show image for debugging purposes
+    cv::imshow(OPENCV_WINDOW_TR, output);
+    cv::waitKey(3); //need waitKey call to update OpenCV image window
     // Convert image to float32
     output.convertTo(output, CV_32F);
     // take a picture if no picture exists or needs update
@@ -99,18 +140,21 @@ public:
     // convert back to
     aux.convertTo(aux, CV_8U, 255);
 
-    // debug code
+    // debug code if publish is needed
     //cv_ptr->image = this->screenshot;
     //cv_ptr->encoding = "mono8";
     //image_pub_.publish(cv_ptr->toImageMsg());
 
     // apply threshold TODO: being able to change threshold with a command
-    cv::threshold(aux, aux, 30, 255, 0);
-
+    cv::threshold(aux, aux, this->threshold, 255, 0);
+    // Show image for debugging purposes
+    cv::imshow(OPENCV_WINDOW_THR, aux);
+    cv::waitKey(3); //need waitKey call to update OpenCV image window
+    // Vectors need to store contours and their heirarchy
     vector<vector<cv::Point> > contours;
-    vector<cv::Vec4i> hierarchy;
+    vector<cv::Vec4i> hierarchy; // needed for cv::findContours but not needed by the program
     // Find contours
-    cv::findContours( aux, contours, hierarchy, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE, cv::Point(0, 0) );
+    cv::findContours( aux, contours, hierarchy, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE, cv::Point(0, 0) );
 
     if(contours.size() > 0)
     {
@@ -130,47 +174,78 @@ public:
       if(this->pub_positions == true)
       {
         ROS_INFO("%lu object(s) detected!\n", contours.size());
+        image_processing::Point2DStampedArray msg_arr;
         for( int i = 0; i < contours.size(); i++ )
         {
-          geometry_msgs::Point32 pmsg;
-          pmsg.x = mc[i].x;
-          pmsg.y = mc[i].y;
-          pmsg.z = 1;
-          position_pub_.publish(pmsg);
+          image_processing::Point2DStamped pmsg;
+          pmsg.id = i+1;
+          pmsg.point.x = mc[i].x;
+          pmsg.point.y = mc[i].y;
+          msg_arr.points.push_back(pmsg);
         }
+        position_pub_.publish(msg_arr);
         this->pub_positions = false;
       }
-
-
       // drawContours
       cv::Mat drawing = cv::Mat::zeros( aux.size(), CV_8UC3 );
       for( int i = 0; i< contours.size(); i++ )
       {
         cv::Scalar color = cv::Scalar( 0, 0, 255 );
-        cv::drawContours( drawing, contours, i, color, 2, 8, hierarchy, 0, cv::Point() );
-        cv::circle( drawing, mc[i], 4, color, -1, 8, 0 );
+        cv::drawContours( drawing, contours, i, color, 1);
+        cv::circle( drawing, mc[i], 1, color, -1, 8, 0 );
       }
       cv::imshow(OPENCV_WINDOW, drawing);
       cv::waitKey(3); //need waitKey call to update OpenCV image window
-
-
     }else
     {
-      cv::imshow(OPENCV_WINDOW, aux);
-      cv::waitKey(3); //need waitKey call to update OpenCV image window
+      if(this->pub_positions == true)
+      {
+        ROS_INFO("No object(s) detected!\n");
+        this->pub_positions = false;
+      }
     }
   }
-
-  void points_setup(const image_processing::screen_points& mesg)
-  {
-    inputQuad[0] = cv::Point2f(mesg.points[0], mesg.points[1]);
-    inputQuad[1] = cv::Point2f(mesg.points[2], mesg.points[3]);
-    inputQuad[2] = cv::Point2f(mesg.points[4], mesg.points[5]);
-    inputQuad[3] = cv::Point2f(mesg.points[6], mesg.points[7]);
-    take_image = true;
-    ROS_INFO("Image points updated to:\nUpLeft    : ( %f,%f )\nUpRight   : ( %f,%f )\nDownRight : ( %f,%f )\nDownLeft  : ( %f,%f )\n", inputQuad[0].x, inputQuad[0].y, inputQuad[1].x, inputQuad[1].y, inputQuad[2].x, inputQuad[2].y, inputQuad[3].x ,inputQuad[3].y);
+  /**************************** threshold_setup ********************************
+  *  This function sets the threshold needed via the subscribed topic
+  *
+  *  Example Usage :
+  *  rostopic pub -1 /image_processing/threshold std_msgs/Int8 "data: 30"
+  *****************************************************************************/
+  void threshold_setup(const std_msgs::Int8& Imsg){
+    this->threshold = Imsg.data;
+    ROS_INFO("New threshold: %d\n", this->threshold);
   }
 
+  /******************************* points_setup ********************************
+  *  This function takes the points that make up our working surface via the
+  *  Subscriber and saves then in an array
+  *
+  *  Example Usage :
+  *  rostopic pub -1 /image_processing/screen_setup image_processing/Point2DArray  "{points:[{x: 35, y: 54}, {x: 424, y: 22}, {x: 471, y: 414}, {x: 60, y: 456}]}"
+  *****************************************************************************/
+  void points_setup(const image_processing::Point2DArray& mesg)
+  {
+    int i = 0;
+    for(vector<image_processing::Point2D>::const_iterator point = mesg.points.begin(); point != mesg.points.end(); ++point)
+    {
+      inputQuad[i] = cv::Point2f(point->x, point->y);
+      i++;
+    }
+    take_image = true;
+    ROS_INFO("Image points updated to:\n\tUpLeft    : ( x: %.0f \ty: %.0f )\n\tUpRight   : ( x: %.0f \ty: %.0f )\n\tDownRight : ( x: %.0f \ty: %.0f )\n\tDownLeft  : ( x: %.0f \ty: %.0f )\n",
+                                        inputQuad[0].x, inputQuad[0].y,
+                                        inputQuad[1].x, inputQuad[1].y,
+                                        inputQuad[2].x, inputQuad[2].y,
+                                        inputQuad[3].x ,inputQuad[3].y);
+  }
+  /********************************* command ***********************************
+  *  This function is used in order to take a screenshot pattern or to publish
+  *  the object positions to /image_processing/position
+  *
+  *  Example Usage :
+  *  rostopic pub -1 /image_processing/command std_msgs/String "data: 'POSITIONS'"
+  *  rostopic pub -1 /image_processing/command std_msgs/String "data: 'SCREENSHOT'"
+  *****************************************************************************/
   void command(const std_msgs::String& com)
   {
     if(com.data == "SCREENSHOT")
@@ -179,9 +254,11 @@ public:
     }else if(com.data == "POSITIONS")
     {
       this->pub_positions = true;
+    }else
+    {
+      ROS_INFO("Invalid Command!!! \n\t\tValid commands :\n\t SCREENSHOT\t: take a new pattern screenshot\n\tPOSITIONS\t: publish the object positions");
     }
   }
-
 }; //end of class definition
 
 
@@ -189,7 +266,7 @@ int main(int argc, char** argv) {
   ros::init(argc, argv, "image_processing");
   ros::NodeHandle n; //
   ImageConverter ic(n); // instantiate object of class ImageConverter
-  ros::Duration timer(0.1);
+  ros::Duration timer(0.1); // --> our loop runs 10 times a second
   while (ros::ok()) {
       ros::spinOnce();
       timer.sleep();
