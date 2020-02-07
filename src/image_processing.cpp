@@ -15,16 +15,15 @@
 
 
 
-static const std::string OPENCV_WINDOW = "Open-CV display window";
+static const std::string OPENCV_WINDOW = "Center Masses Image";
 static const std::string OPENCV_WINDOW_TR = "Transformed/Blured Image";
 static const std::string OPENCV_WINDOW_THR = "Threshold-ed Image";
+static const std::string OPENCV_WINDOW_OR = "Original Image";
 
 using namespace std;
 
 /*
 *   TODOS :
-*   add outputQuad command,
-*   image size variable/commands
 *   GUI for threshold /
 *   https://docs.opencv.org/3.4/d8/dd8/tutorial_good_features_to_track.html
 */
@@ -38,6 +37,7 @@ class ImageConverter {
   ros::Subscriber point_sub_;
   ros::Subscriber command_sub_;
   ros::Subscriber threshold_sub_;
+  ros::Subscriber output_size_sub_;
   ros::Publisher position_pub_;
   cv::Point2f outputQuad[4];
   cv::Point2f inputQuad[4];
@@ -45,6 +45,8 @@ class ImageConverter {
   bool take_image;
   bool pub_positions;
   int threshold;
+  int output_image_x;
+  int output_image_y;
 
 public:
 
@@ -59,9 +61,17 @@ public:
       point_sub_ = nh_.subscribe("/image_processing/screen_setup", 1, &ImageConverter::points_setup, this);
       command_sub_ = nh_.subscribe("/image_processing/command", 1, &ImageConverter::command, this);
       threshold_sub_ = nh_.subscribe("/image_processing/threshold", 1,  &ImageConverter::threshold_setup, this);
+      output_size_sub_ = nh_.subscribe("/image_processing/size_setup", 1, &ImageConverter::size_setup, this);
 
       // Position publisher
       position_pub_ = nh_.advertise<image_processing::Point2DStampedArray>("/image_processing/position", 1);
+
+      // Iniatial values for given variables
+      take_image = true;
+      pub_positions = false;
+      threshold = 30;
+      output_image_x = 600;
+      output_image_y = 600;
 
       // The 4 points that select quadilateral on the input , from top-left in clockwise order
       // These four pts are the sides of the rect box used as input
@@ -71,27 +81,25 @@ public:
       inputQuad[3] = cv::Point2f(0,480);
       // The 4 points where the mapping is to be done , from top-left in clockwise order
       outputQuad[0] = cv::Point2f(0,0);
-      outputQuad[1] = cv::Point2f(400,0);
-      outputQuad[2] = cv::Point2f(400,400);
-      outputQuad[3] = cv::Point2f(0,400);
-
-      // Iniatial values for given variables
-      take_image = true;
-      pub_positions = false;
-      threshold = 30;
+      outputQuad[1] = cv::Point2f(output_image_x,0);
+      outputQuad[2] = cv::Point2f(output_image_x,output_image_y);
+      outputQuad[3] = cv::Point2f(0,output_image_y);
 
       // Debuggin and demonstration windows
       cv::namedWindow(OPENCV_WINDOW_THR);
       cv::namedWindow(OPENCV_WINDOW_TR);
       cv::namedWindow(OPENCV_WINDOW);
+      cv::namedWindow(OPENCV_WINDOW_OR);
       // placing the windows far appart
-      cv::moveWindow(OPENCV_WINDOW_THR, 400,0);
-      cv::moveWindow(OPENCV_WINDOW, 800,0);
+      cv::moveWindow(OPENCV_WINDOW_TR, 640,0);
+      cv::moveWindow(OPENCV_WINDOW_THR, 640+output_image_x,0);
+      cv::moveWindow(OPENCV_WINDOW, 0,480);
 
   }
 
   ~ImageConverter() {
       cv::destroyWindow(OPENCV_WINDOW);
+      cv::destroyWindow(OPENCV_WINDOW_OR);
       cv::destroyWindow(OPENCV_WINDOW_THR);
       cv::destroyWindow(OPENCV_WINDOW_TR);
   }
@@ -99,8 +107,6 @@ public:
   /******************************** imageCb ************************************
   *  This function is the image conversion loop
   *
-  *  Example Usage :
-  *  rostopic pub -1 /image_processing/threshold std_msgs/Int8 "data: 30"
   *****************************************************************************/
   void imageCb(const sensor_msgs::ImageConstPtr& msg) {
     //image comes in as a ROS message, but gets converted to an OpenCV type
@@ -111,6 +117,9 @@ public:
       ROS_ERROR("cv_bridge exception: %s", e.what());
       return;
     }
+    // Show image for debugging purposes
+    cv::imshow(OPENCV_WINDOW_OR, cv_ptr->image);
+    cv::waitKey(3); //need waitKey call to update OpenCV image window
     cv::Mat gray_image, lambda, output, aux;
     //convert the color image to grayscale:
     cv::cvtColor(cv_ptr->image, gray_image, CV_BGR2GRAY);
@@ -119,7 +128,7 @@ public:
     // Get the Perspective Transform Matrix i.e. lambda
     lambda = getPerspectiveTransform( inputQuad, outputQuad );
     // Apply the Perspective Transform just found to the src image
-    warpPerspective(gray_image,output,lambda, cv::Size(400, 400) );
+    warpPerspective(gray_image,output,lambda, cv::Size(this->output_image_x, this->output_image_y) );
     /// Reduce noise with a kernel 3x3
     blur( output, output, cv::Size(3,3) );
     // Show image for debugging purposes
@@ -145,7 +154,7 @@ public:
     //cv_ptr->encoding = "mono8";
     //image_pub_.publish(cv_ptr->toImageMsg());
 
-    // apply threshold TODO: being able to change threshold with a command
+    // apply threshold 
     cv::threshold(aux, aux, this->threshold, 255, 0);
     // Show image for debugging purposes
     cv::imshow(OPENCV_WINDOW_THR, aux);
@@ -205,8 +214,9 @@ public:
       }
     }
   }
+
   /**************************** threshold_setup ********************************
-  *  This function sets the threshold needed via the subscribed topic
+  *  This function sets the threshold needed via the subscribed topic.
   *
   *  Example Usage :
   *  rostopic pub -1 /image_processing/threshold std_msgs/Int8 "data: 30"
@@ -218,7 +228,7 @@ public:
 
   /******************************* points_setup ********************************
   *  This function takes the points that make up our working surface via the
-  *  Subscriber and saves then in an array
+  *  Subscriber and then saves in an array.
   *
   *  Example Usage :
   *  rostopic pub -1 /image_processing/screen_setup image_processing/Point2DArray  "{points:[{x: 35, y: 54}, {x: 424, y: 22}, {x: 471, y: 414}, {x: 60, y: 456}]}"
@@ -238,9 +248,27 @@ public:
                                         inputQuad[2].x, inputQuad[2].y,
                                         inputQuad[3].x ,inputQuad[3].y);
   }
+
+    /******************************* size_setup ********************************
+  *  This function changes the output image size to x rows,y columns
+  *
+  *  Example Usage :
+  *  rostopic pub -1 /image_processing/screen_setup image_processing/Point2D "x: 300 y: 300"
+  *****************************************************************************/
+  void size_setup(const image_processing::Point2D& Smesg)
+  {
+    this->output_image_x = Smesg.x;
+    this->output_image_y = Smesg.y;
+    this->outputQuad[1] = cv::Point2f(this->output_image_x,0);
+    this->outputQuad[2] = cv::Point2f(this->output_image_x,this->output_image_y);
+    this->outputQuad[3] = cv::Point2f(0,this->output_image_y);
+    this->take_image = true;
+    ROS_INFO("Output image size updated to - x: %d y: %d\n", Smesg.x, Smesg.y);
+  }
+
   /********************************* command ***********************************
   *  This function is used in order to take a screenshot pattern or to publish
-  *  the object positions to /image_processing/position
+  *  the object positions to /image_processing/position.
   *
   *  Example Usage :
   *  rostopic pub -1 /image_processing/command std_msgs/String "data: 'POSITIONS'"
