@@ -5,13 +5,13 @@
 #include <sensor_msgs/image_encodings.h>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
-#include <std_msgs/String.h>
-#include <std_msgs/Int8.h>
-#include <std_msgs/Int16.h>
+#include <image_processing/PassValue.h>
 #include <image_processing/Point2D.h>
 #include <image_processing/Point2DArray.h>
 #include <image_processing/Point2DStamped.h>
 #include <image_processing/Point2DStampedArray.h>
+#include <image_processing/Size.h>
+#include <std_srvs/Empty.h>
 
 
 
@@ -33,11 +33,6 @@ class ImageConverter {
   ros::NodeHandle nh_;
   image_transport::ImageTransport it_;
   image_transport::Subscriber image_sub_;
-  image_transport::Publisher image_pub_;
-  ros::Subscriber point_sub_;
-  ros::Subscriber command_sub_;
-  ros::Subscriber threshold_sub_;
-  ros::Subscriber output_size_sub_;
   ros::Publisher position_pub_;
   cv::Point2f outputQuad[4];
   cv::Point2f inputQuad[4];
@@ -55,23 +50,16 @@ public:
   : it_(nh_) {
       // Subscribe to input video feed and publish output video feed
       image_sub_ = it_.subscribe("/usb_cam/image_raw", 1, &ImageConverter::imageCb, this);
-      image_pub_ = it_.advertise("/image_processing/debug", 1); // curently not in use
-
-      // Subscribers needed for setup
-      point_sub_ = nh_.subscribe("/image_processing/screen_setup", 1, &ImageConverter::points_setup, this);
-      command_sub_ = nh_.subscribe("/image_processing/command", 1, &ImageConverter::command, this);
-      threshold_sub_ = nh_.subscribe("/image_processing/threshold", 1,  &ImageConverter::threshold_setup, this);
-      output_size_sub_ = nh_.subscribe("/image_processing/size_setup", 1, &ImageConverter::size_setup, this);
 
       // Position publisher
-      position_pub_ = nh_.advertise<image_processing::Point2DStampedArray>("/image_processing/position", 1);
+      position_pub_ = nh_.advertise<image_processing::Point2DStampedArray>("/image_processing/positions", 1);
 
       // Iniatial values for given variables
       take_image = true;
       pub_positions = false;
       threshold = 30;
-      output_image_x = 600;
-      output_image_y = 600;
+      output_image_x = 520; 
+      output_image_y = 320; 
 
       // The 4 points that select quadilateral on the input , from top-left in clockwise order
       // These four pts are the sides of the rect box used as input
@@ -140,7 +128,7 @@ public:
     if(this->take_image)
     {
       this->screenshot = output;
-      ROS_INFO("New Screenshot taken!\n");
+      ROS_INFO("New Screenshot taken!");
 
       this->take_image = false;
     }
@@ -148,11 +136,6 @@ public:
     aux = 1-(output/this->screenshot);
     // convert back to
     aux.convertTo(aux, CV_8U, 255);
-
-    // debug code if publish is needed
-    //cv_ptr->image = this->screenshot;
-    //cv_ptr->encoding = "mono8";
-    //image_pub_.publish(cv_ptr->toImageMsg());
 
     // apply threshold 
     cv::threshold(aux, aux, this->threshold, 255, 0);
@@ -179,10 +162,11 @@ public:
       {
         mc[i] = cv::Point2f( mu[i].m10/mu[i].m00 , mu[i].m01/mu[i].m00 );
       }
-        // publish the centers of mass
+
+      // publish the centers of mass
       if(this->pub_positions == true)
       {
-        ROS_INFO("%lu object(s) detected!\n", contours.size());
+        ROS_INFO("%lu object(s) detected!", contours.size());
         image_processing::Point2DStampedArray msg_arr;
         for( int i = 0; i < contours.size(); i++ )
         {
@@ -209,34 +193,36 @@ public:
     {
       if(this->pub_positions == true)
       {
-        ROS_INFO("No object(s) detected!\n");
+        ROS_INFO("No object(s) detected!");
         this->pub_positions = false;
       }
     }
   }
 
   /**************************** threshold_setup ********************************
-  *  This function sets the threshold needed via the subscribed topic.
+  *  This service sets the threshold.
   *
   *  Example Usage :
-  *  rostopic pub -1 /image_processing/threshold std_msgs/Int8 "data: 30"
+  *  rosservice call /threshold_setup "x: 50"
   *****************************************************************************/
-  void threshold_setup(const std_msgs::Int8& Imsg){
-    this->threshold = Imsg.data;
-    ROS_INFO("New threshold: %d\n", this->threshold);
+  bool threshold_setup(image_processing::PassValue::Request &req,
+                      image_processing::PassValue::Response &res)
+  {
+    this->threshold = req.x;
+    ROS_INFO("New threshold: %d", this->threshold);
+    return true;
   }
 
   /******************************* points_setup ********************************
-  *  This function takes the points that make up our working surface via the
-  *  Subscriber and then saves in an array.
+  *  This service takes the points that make up our working surface and saves them in an array.
   *
   *  Example Usage :
-  *  rostopic pub -1 /image_processing/screen_setup image_processing/Point2DArray  "{points:[{x: 35, y: 54}, {x: 424, y: 22}, {x: 471, y: 414}, {x: 60, y: 456}]}"
+  *  rosservice call /image_processing/setup/screen_setup "{points:[{x: 35, y: 54}, {x: 424, y: 22}, {x: 471, y: 414}, {x: 60, y: 456}]}"
   *****************************************************************************/
-  void points_setup(const image_processing::Point2DArray& mesg)
+  bool points_setup(image_processing::Point2DArray::Request &req, image_processing::Point2DArray::Response &res)
   {
     int i = 0;
-    for(vector<image_processing::Point2D>::const_iterator point = mesg.points.begin(); point != mesg.points.end(); ++point)
+    for(vector<image_processing::Point2D>::const_iterator point = req.points.begin(); point != req.points.end(); ++point)
     {
       inputQuad[i] = cv::Point2f(point->x, point->y);
       i++;
@@ -247,23 +233,25 @@ public:
                                         inputQuad[1].x, inputQuad[1].y,
                                         inputQuad[2].x, inputQuad[2].y,
                                         inputQuad[3].x ,inputQuad[3].y);
+    return true;
   }
 
     /******************************* size_setup ********************************
-  *  This function changes the output image size to x rows,y columns
+  *  This service changes the output image size to x columns,y rows
   *
   *  Example Usage :
-  *  rostopic pub -1 /image_processing/screen_setup image_processing/Point2D "x: 300 y: 300"
+  *  rosservice call /image_processing/setup/size "x: 520 y: 320"
   *****************************************************************************/
-  void size_setup(const image_processing::Point2D& Smesg)
+  bool size_setup(image_processing::Size::Request &req, image_processing::Size::Response &res)
   {
-    this->output_image_x = Smesg.x;
-    this->output_image_y = Smesg.y;
+    this->output_image_x = req.x;
+    this->output_image_y = req.y;
     this->outputQuad[1] = cv::Point2f(this->output_image_x,0);
     this->outputQuad[2] = cv::Point2f(this->output_image_x,this->output_image_y);
     this->outputQuad[3] = cv::Point2f(0,this->output_image_y);
     this->take_image = true;
-    ROS_INFO("Output image size updated to - x: %d y: %d\n", Smesg.x, Smesg.y);
+    ROS_INFO("Output image size updated to - x: %d y: %d", req.x, req.y);
+    return true;
   }
 
   /********************************* command ***********************************
@@ -271,21 +259,13 @@ public:
   *  the object positions to /image_processing/position.
   *
   *  Example Usage :
-  *  rostopic pub -1 /image_processing/command std_msgs/String "data: 'POSITIONS'"
-  *  rostopic pub -1 /image_processing/command std_msgs/String "data: 'SCREENSHOT'"
+  *  rosservice call /image_processing/publish "{}"
   *****************************************************************************/
-  void command(const std_msgs::String& com)
+  bool points_pub(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res)
   {
-    if(com.data == "SCREENSHOT")
-    {
-      this->take_image = true;
-    }else if(com.data == "POSITIONS")
-    {
+      ROS_INFO("Publishing the object's position");
       this->pub_positions = true;
-    }else
-    {
-      ROS_INFO("Invalid Command!!! \n\t\tValid commands :\n\t SCREENSHOT\t: take a new pattern screenshot\n\tPOSITIONS\t: publish the object positions");
-    }
+      return true;
   }
 }; //end of class definition
 
@@ -294,7 +274,14 @@ int main(int argc, char** argv) {
   ros::init(argc, argv, "image_processing");
   ros::NodeHandle n; //
   ImageConverter ic(n); // instantiate object of class ImageConverter
-  ros::Duration timer(0.1); // --> our loop runs 10 times a second
+  
+  // Services needed for setup
+  ros::ServiceServer threshhold_ = n.advertiseService("/image_processing/setup/threshold", &ImageConverter::threshold_setup, &ic);
+  ros::ServiceServer output_size_ = n.advertiseService("/image_processing/setup/size", &ImageConverter::size_setup, &ic);
+  ros::ServiceServer publish_ = n.advertiseService("/image_processing/publish", &ImageConverter::points_pub, &ic);
+  ros::ServiceServer point_sub_ = n.advertiseService("/image_processing/setup/screen_setup", &ImageConverter::points_setup, &ic);
+
+  ros::Duration timer(0.1); // our loop runs 10 times a second
   while (ros::ok()) {
       ros::spinOnce();
       timer.sleep();
