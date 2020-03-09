@@ -1,5 +1,6 @@
 #include <ros/ros.h>
 #include <string>
+#include <algorithm>
 #include <image_transport/image_transport.h>
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/image_encodings.h>
@@ -8,8 +9,6 @@
 #include <image_processing/PassValue.h>
 #include <image_processing/Point2D.h>
 #include <image_processing/Point2DArray.h>
-#include <image_processing/Point2DStamped.h>
-#include <image_processing/Point2DStampedArray.h>
 #include <image_processing/Size.h>
 #include <std_srvs/Empty.h>
 
@@ -52,7 +51,7 @@ public:
       image_sub_ = it_.subscribe("/usb_cam/image_raw", 1, &ImageConverter::imageCb, this);
 
       // Position publisher
-      position_pub_ = nh_.advertise<image_processing::Point2DStampedArray>("/image_processing/positions", 1);
+      position_pub_ = nh_.advertise<image_processing::Point2D>("/image_processing/positions", 1);
 
       // Iniatial values for given variables
       take_image = true;
@@ -147,58 +146,57 @@ public:
     vector<cv::Vec4i> hierarchy; // needed for cv::findContours but not needed by the program
     // Find contours
     cv::findContours( aux, contours, hierarchy, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE, cv::Point(0, 0) );
-
-    if(contours.size() > 0)
+    if(this->pub_positions == true)
     {
-      /// Get the moments
-      vector<cv::Moments> mu(contours.size() );
-      for( int i = 0; i < contours.size(); i++ )
+      if(contours.size() > 0)
       {
-        mu[i] = moments( contours[i], false );
-      }
-      ///  Get the mass centers:
-      vector<cv::Point2f> mc( contours.size() );
-      for( int i = 0; i < contours.size(); i++ )
-      {
-        mc[i] = cv::Point2f( mu[i].m10/mu[i].m00 , mu[i].m01/mu[i].m00 );
-      }
-
-      // publish the centers of mass
-      if(this->pub_positions == true)
-      {
-        ROS_INFO("%lu object(s) detected!", contours.size());
-        image_processing::Point2DStampedArray msg_arr;
+        /// Get the moments
+        vector<cv::Moments> mu(contours.size() );
         for( int i = 0; i < contours.size(); i++ )
         {
-          image_processing::Point2DStamped pmsg;
-          pmsg.id = i+1;
-          pmsg.point.x = mc[i].x;
-          pmsg.point.y = mc[i].y;
-          msg_arr.points.push_back(pmsg);
+          mu[i] = moments( contours[i], false );
         }
-        position_pub_.publish(msg_arr);
-        this->pub_positions = false;
-      }
-      // drawContours
-      cv::Mat drawing = cv::Mat::zeros( aux.size(), CV_8UC3 );
-      for( int i = 0; i< contours.size(); i++ )
+        ///  Get the mass centers:
+        vector<cv::Point2f> mc( contours.size() );
+        for( int i = 0; i < contours.size(); i++ )
+        {
+          mc[i] = cv::Point2f( mu[i].m10/mu[i].m00 , mu[i].m01/mu[i].m00 );
+        }
+
+        // publish the centers of mass
+        if(this->pub_positions == true)
+        {
+          ROS_INFO("%lu object(s) detected!", contours.size());
+          // sorting center of masses so we can get the one closest to us 
+          if(contours.size() > 1){
+            sort(mc.begin(), mc.end(), ImageConverter::sortByY);
+          }
+          image_processing::Point2D pmsg;
+          pmsg.x = mc[0].x;
+          pmsg.y = mc[0].y; 
+          this->pub_positions = false;
+          position_pub_.publish(pmsg);
+          ROS_INFO("Publishing Point -- x: %.0f  y:%.0f!", mc[0].x, mc[0].y);
+        }
+        // drawContours
+        cv::Mat drawing = cv::Mat::zeros( aux.size(), CV_8UC3 );
+        for( int i = 0; i< contours.size(); i++ )
+        {
+          cv::Scalar color = cv::Scalar( 0, 0, 255 );
+          cv::drawContours( drawing, contours, i, color, 1);
+          cv::circle( drawing, mc[i], 1, color, -1, 8, 0 );
+        }
+        cv::imshow(OPENCV_WINDOW, drawing);
+        cv::waitKey(3); //need waitKey call to update OpenCV image window
+      }else
       {
-        cv::Scalar color = cv::Scalar( 0, 0, 255 );
-        cv::drawContours( drawing, contours, i, color, 1);
-        cv::circle( drawing, mc[i], 1, color, -1, 8, 0 );
-      }
-      cv::imshow(OPENCV_WINDOW, drawing);
-      cv::waitKey(3); //need waitKey call to update OpenCV image window
-    }else
-    {
-      if(this->pub_positions == true)
-      {
-        ROS_INFO("No object(s) detected!");
-        this->pub_positions = false;
+          ROS_INFO("No object(s) detected!");
+          this->pub_positions = false;
       }
     }
   }
 
+  static bool sortByY(const cv::Point2f &lhs, const cv::Point2f &rhs) { return lhs.y >= rhs.y; }
   /**************************** threshold_setup ********************************
   *  This service sets the threshold.
   *
@@ -254,7 +252,7 @@ public:
     return true;
   }
 
-  /********************************* command ***********************************
+  /********************************* points_pub *********************************
   *  This function is used in order to take a screenshot pattern or to publish
   *  the object positions to /image_processing/position.
   *
